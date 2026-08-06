@@ -355,9 +355,15 @@ def health():
     return jsonify({"status": "healthy"})
 
 # =============================================
-# STARTUP
+# STARTUP — FOR RENDER
 # =============================================
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    import os
+    port = int(os.environ.get('PORT', 10000))
+    print(f"Starting Synapse on port {port}...")
+    app.run(host='0.0.0.0', port=port, debug=False)
+else:
+    # When running with gunicorn
+    import os
+    print(f"Synapse ready on port {os.environ.get('PORT', '10000')}")
