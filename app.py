@@ -15,9 +15,28 @@ app.config.from_object(Config)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-data_store = DataStore()
-search_engine = SearchEngine()
-key_manager = KeyManager()
+# Lazy init — don't load models on startup
+data_store = None
+search_engine = None
+key_manager = None
+
+def get_data_store():
+    global data_store
+    if data_store is None:
+        data_store = DataStore()
+    return data_store
+
+def get_search_engine():
+    global search_engine
+    if search_engine is None:
+        search_engine = SearchEngine()
+    return search_engine
+
+def get_key_manager():
+    global key_manager
+    if key_manager is None:
+        key_manager = KeyManager()
+    return key_manager
 
 # =============================================
 # STATIC FILES
@@ -27,12 +46,8 @@ key_manager = KeyManager()
 def dashboard():
     return send_from_directory('static', 'dashboard.html')
 
-@app.route('/dashboard/<path:filename>')
-def dashboard_static(filename):
-    return send_from_directory('static', filename)
-
 # =============================================
-# API KEY MANAGEMENT ENDPOINTS
+# API KEY MANAGEMENT
 # =============================================
 
 @app.route('/admin/keys/generate', methods=['POST'])
@@ -47,9 +62,8 @@ def generate_key():
     request_limit = int(data.get('request_limit', 10000))
     expires_in_days = int(data.get('expires_in_days', 0))
 
-    key_data = key_manager.create_key(name, token_limit, request_limit, expires_in_days)
-
-    logger.info(f"API key generated: {key_data['id']} ({name})")
+    km = get_key_manager()
+    key_data = km.create_key(name, token_limit, request_limit, expires_in_days)
 
     return jsonify({
         "status": "created",
@@ -74,25 +88,9 @@ def list_keys():
     if auth_header != f"Bearer {Config.ADMIN_SECRET}":
         return jsonify({"error": "Unauthorized"}), 401
 
-    keys = key_manager.list_keys()
-
-    return jsonify({
-        "keys": keys,
-        "total": len(keys)
-    })
-
-@app.route('/admin/keys/<key_id>', methods=['GET'])
-def get_key(key_id):
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header != f"Bearer {Config.ADMIN_SECRET}":
-        return jsonify({"error": "Unauthorized"}), 401
-
-    key_info = key_manager.get_key_info(key_id)
-
-    if not key_info:
-        return jsonify({"error": "Key not found"}), 404
-
-    return jsonify(key_info)
+    km = get_key_manager()
+    keys = km.list_keys()
+    return jsonify({"keys": keys, "total": len(keys)})
 
 @app.route('/admin/keys/<key_id>/revoke', methods=['POST'])
 def revoke_key(key_id):
@@ -100,59 +98,15 @@ def revoke_key(key_id):
     if auth_header != f"Bearer {Config.ADMIN_SECRET}":
         return jsonify({"error": "Unauthorized"}), 401
 
-    success = key_manager.revoke_key(key_id)
-
+    km = get_key_manager()
+    success = km.revoke_key(key_id)
     if not success:
         return jsonify({"error": "Key not found"}), 404
 
-    logger.info(f"API key revoked: {key_id}")
-
-    return jsonify({
-        "status": "revoked",
-        "id": key_id,
-        "message": "This key can no longer be used"
-    })
-
-@app.route('/admin/keys/<key_id>/limits', methods=['PUT'])
-def update_key_limits(key_id):
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header != f"Bearer {Config.ADMIN_SECRET}":
-        return jsonify({"error": "Unauthorized"}), 401
-
-    data = request.get_json() or {}
-    token_limit = data.get('token_limit')
-    request_limit = data.get('request_limit')
-
-    success = key_manager.update_limits(key_id, token_limit, request_limit)
-
-    if not success:
-        return jsonify({"error": "Key not found"}), 404
-
-    return jsonify({
-        "status": "updated",
-        "id": key_id,
-        "token_limit": token_limit,
-        "request_limit": request_limit
-    })
-
-@app.route('/admin/stats')
-def admin_stats():
-    auth_header = request.headers.get('Authorization', '')
-    if auth_header != f"Bearer {Config.ADMIN_SECRET}":
-        return jsonify({"error": "Unauthorized"}), 401
-
-    storage_stats = data_store.get_stats()
-    key_stats = key_manager.get_stats()
-
-    return jsonify({
-        "storage": storage_stats,
-        "keys": key_stats,
-        "uptime": time.time() - app.start_time if hasattr(app, 'start_time') else 0
-    })
+    return jsonify({"status": "revoked", "id": key_id})
 
 # =============================================
-# INTERNAL ENDPOINTS (called by NeuralForge)
-# No API key required
+# INTERNAL ENDPOINTS (NeuralForge)
 # =============================================
 
 @app.route('/internal/search')
@@ -165,14 +119,11 @@ def internal_search():
     limit = int(request.args.get('limit', 20))
 
     if not query:
-        return jsonify({"error": "Query parameter 'q' required"}), 400
+        return jsonify({"error": "Query required"}), 400
 
-    results = search_engine.search(query, search_type, limit)
-    return jsonify({
-        "results": results,
-        "count": len(results),
-        "query": query
-    })
+    se = get_search_engine()
+    results = se.search(query, search_type, limit)
+    return jsonify({"results": results, "count": len(results), "query": query})
 
 @app.route('/internal/store', methods=['POST'])
 def internal_store():
@@ -183,24 +134,19 @@ def internal_store():
     if not data or 'content' not in data:
         return jsonify({"error": "Content required"}), 400
 
-    content = data['content']
-    content_type = data.get('type', 'text')
-    metadata = data.get('metadata', {})
-    file_data = data.get('file_data')
-    file_extension = data.get('file_extension')
-
-    stored_id = data_store.save(content, content_type, metadata, file_data, file_extension)
+    ds = get_data_store()
+    stored_id = ds.save(
+        data['content'],
+        data.get('type', 'text'),
+        data.get('metadata', {}),
+        data.get('file_data'),
+        data.get('file_extension')
+    )
 
     if stored_id is None:
-        return jsonify({"error": "Storage limit reached for this file type"}), 413
+        return jsonify({"error": "Storage limit reached"}), 413
 
-    logger.info(f"Internal store: {stored_id} ({content_type})")
-
-    return jsonify({
-        "id": stored_id,
-        "status": "stored",
-        "type": content_type
-    })
+    return jsonify({"id": stored_id, "status": "stored"})
 
 @app.route('/internal/knowledge')
 def internal_get_knowledge():
@@ -211,14 +157,11 @@ def internal_get_knowledge():
     limit = int(request.args.get('limit', 50))
 
     if not topic:
-        return jsonify({"error": "Topic parameter required"}), 400
+        return jsonify({"error": "Topic required"}), 400
 
-    knowledge = data_store.get_by_topic(topic, limit)
-    return jsonify({
-        "knowledge": knowledge,
-        "count": len(knowledge),
-        "topic": topic
-    })
+    ds = get_data_store()
+    knowledge = ds.get_by_topic(topic, limit)
+    return jsonify({"knowledge": knowledge, "count": len(knowledge), "topic": topic})
 
 @app.route('/internal/delete', methods=['DELETE'])
 def internal_delete():
@@ -227,11 +170,11 @@ def internal_delete():
 
     data = request.get_json()
     knowledge_id = data.get('id')
-
     if not knowledge_id:
         return jsonify({"error": "ID required"}), 400
 
-    data_store.delete(knowledge_id)
+    ds = get_data_store()
+    ds.delete(knowledge_id)
     return jsonify({"status": "deleted", "id": knowledge_id})
 
 @app.route('/internal/bulk-store', methods=['POST'])
@@ -243,51 +186,45 @@ def internal_bulk_store():
     if not data or 'items' not in data:
         return jsonify({"error": "Items array required"}), 400
 
+    ds = get_data_store()
     items = data['items']
     stored_ids = []
 
     for item in items:
-        content = item.get('content', '')
-        content_type = item.get('type', 'text')
-        metadata = item.get('metadata', {})
-        file_data = item.get('file_data')
-        file_extension = item.get('file_extension')
-        stored_id = data_store.save(content, content_type, metadata, file_data, file_extension)
-        if stored_id:
-            stored_ids.append(stored_id)
+        sid = ds.save(
+            item.get('content', ''),
+            item.get('type', 'text'),
+            item.get('metadata', {}),
+            item.get('file_data'),
+            item.get('file_extension')
+        )
+        if sid:
+            stored_ids.append(sid)
 
-    logger.info(f"Bulk store: {len(stored_ids)} items")
-
-    return jsonify({
-        "stored_ids": stored_ids,
-        "count": len(stored_ids),
-        "status": "stored"
-    })
+    return jsonify({"stored_ids": stored_ids, "count": len(stored_ids)})
 
 @app.route('/internal/file/<knowledge_id>')
 def internal_get_file(knowledge_id):
     if not is_internal_request(request):
         return jsonify({"error": "Internal access only"}), 403
 
-    file_data, file_ext = data_store.get_file(knowledge_id)
+    ds = get_data_store()
+    file_data, file_ext = ds.get_file(knowledge_id)
     if file_data is None:
         return jsonify({"error": "File not found"}), 404
 
     mime_types = {
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
         'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
-        'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/x-msvideo',
-        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'flac': 'audio/flac',
-        'pdf': 'application/pdf', 'json': 'application/json',
-        'txt': 'text/plain', 'csv': 'text/csv', 'html': 'text/html',
-        'zip': 'application/zip', 'tar': 'application/x-tar', 'gz': 'application/gzip'
+        'mp4': 'video/mp4', 'webm': 'video/webm',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+        'pdf': 'application/pdf', 'txt': 'text/plain', 'json': 'application/json'
     }
     mime = mime_types.get(file_ext.lower(), 'application/octet-stream')
     return Response(file_data, mimetype=mime)
 
 # =============================================
 # EXTERNAL ENDPOINTS (API key required)
-# Token limits enforced
 # =============================================
 
 @app.route('/api/v1/search')
@@ -299,18 +236,13 @@ def external_search():
     limit = int(request.args.get('limit', 20))
 
     if not query:
-        return jsonify({"error": "Query parameter 'q' required"}), 400
+        return jsonify({"error": "Query required"}), 400
 
-    results = search_engine.search(query, search_type, limit)
-
+    se = get_search_engine()
+    results = se.search(query, search_type, limit)
     tokens = len(query.split()) + sum(len(r['content'].split()) for r in results)
 
-    return jsonify({
-        "results": results,
-        "count": len(results),
-        "query": query,
-        "tokens_used": tokens
-    })
+    return jsonify({"results": results, "count": len(results), "query": query, "tokens_used": tokens})
 
 @app.route('/api/v1/store', methods=['POST'])
 @require_api_key
@@ -320,27 +252,20 @@ def external_store():
     if not data or 'content' not in data:
         return jsonify({"error": "Content required"}), 400
 
-    content = data['content']
-    content_type = data.get('type', 'text')
-    metadata = data.get('metadata', {})
-    file_data = data.get('file_data')
-    file_extension = data.get('file_extension')
-
-    stored_id = data_store.save(content, content_type, metadata, file_data, file_extension)
+    ds = get_data_store()
+    stored_id = ds.save(
+        data['content'],
+        data.get('type', 'text'),
+        data.get('metadata', {}),
+        data.get('file_data'),
+        data.get('file_extension')
+    )
 
     if stored_id is None:
-        return jsonify({"error": "Storage limit reached for this file type"}), 413
+        return jsonify({"error": "Storage limit reached"}), 413
 
-    tokens = len(content.split())
-
-    logger.info(f"External store: {stored_id} ({content_type})")
-
-    return jsonify({
-        "id": stored_id,
-        "status": "stored",
-        "type": content_type,
-        "tokens_used": tokens
-    })
+    tokens = len(data['content'].split())
+    return jsonify({"id": stored_id, "status": "stored", "type": data.get('type', 'text'), "tokens_used": tokens})
 
 @app.route('/api/v1/knowledge')
 @require_api_key
@@ -350,34 +275,28 @@ def external_get_knowledge():
     limit = int(request.args.get('limit', 50))
 
     if not topic:
-        return jsonify({"error": "Topic parameter required"}), 400
+        return jsonify({"error": "Topic required"}), 400
 
-    knowledge = data_store.get_by_topic(topic, limit)
-
+    ds = get_data_store()
+    knowledge = ds.get_by_topic(topic, limit)
     tokens = sum(len(k['content'].split()) for k in knowledge)
 
-    return jsonify({
-        "knowledge": knowledge,
-        "count": len(knowledge),
-        "topic": topic,
-        "tokens_used": tokens
-    })
+    return jsonify({"knowledge": knowledge, "count": len(knowledge), "topic": topic, "tokens_used": tokens})
 
 @app.route('/api/v1/file/<knowledge_id>')
 @require_api_key
 def external_get_file(knowledge_id):
-    file_data, file_ext = data_store.get_file(knowledge_id)
+    ds = get_data_store()
+    file_data, file_ext = ds.get_file(knowledge_id)
     if file_data is None:
         return jsonify({"error": "File not found"}), 404
 
     mime_types = {
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
         'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
-        'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/x-msvideo',
-        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'flac': 'audio/flac',
-        'pdf': 'application/pdf', 'json': 'application/json',
-        'txt': 'text/plain', 'csv': 'text/csv', 'html': 'text/html',
-        'zip': 'application/zip', 'tar': 'application/x-tar', 'gz': 'application/gzip'
+        'mp4': 'video/mp4', 'webm': 'video/webm',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+        'pdf': 'application/pdf', 'txt': 'text/plain', 'json': 'application/json'
     }
     mime = mime_types.get(file_ext.lower(), 'application/octet-stream')
     return Response(file_data, mimetype=mime)
@@ -385,8 +304,8 @@ def external_get_file(knowledge_id):
 @app.route('/api/v1/stats')
 @require_api_key
 def external_stats():
-    stats = data_store.get_stats()
-    return jsonify(stats)
+    ds = get_data_store()
+    return jsonify(ds.get_stats())
 
 @app.route('/api/v1/key/info')
 @require_api_key
@@ -394,7 +313,8 @@ def key_info():
     api_key = request.headers.get('X-API-Key')
     import hashlib
     key_hash = hashlib.sha256(api_key.encode()).hexdigest()
-    info = key_manager.get_key_info_by_hash(key_hash)
+    km = get_key_manager()
+    info = km.get_key_info_by_hash(key_hash)
 
     if not info:
         return jsonify({"error": "Key not found"}), 404
@@ -412,7 +332,7 @@ def key_info():
     })
 
 # =============================================
-# PUBLIC ENDPOINTS
+# PUBLIC
 # =============================================
 
 @app.route('/')
@@ -432,55 +352,12 @@ def index():
 
 @app.route('/health')
 def health():
-    stats = data_store.get_stats()
-    return jsonify({
-        "status": "healthy",
-        "uptime": time.time() - app.start_time if hasattr(app, 'start_time') else 0,
-        "storage": stats
-    })
-
-# =============================================
-# BACKGROUND TASKS
-# =============================================
-
-def cleanup_expired_keys():
-    """Deactivate expired API keys"""
-    while True:
-        time.sleep(3600)
-        try:
-            count = key_manager.deactivate_expired_keys()
-            if count > 0:
-                logger.info(f"Deactivated {count} expired API keys")
-        except Exception as e:
-            logger.error(f"Key cleanup error: {e}")
-
-def storage_monitor():
-    """Log storage stats periodically"""
-    while True:
-        time.sleep(43200)  # Every 12 hours
-        try:
-            stats = data_store.get_stats()
-            logger.info(f"Storage stats: {stats['total_items']} items, "
-                       f"{stats['file_storage']['total_mb']} MB files, "
-                       f"{stats['content_mb']} MB content")
-        except Exception as e:
-            logger.error(f"Storage monitor error: {e}")
+    return jsonify({"status": "healthy"})
 
 # =============================================
 # STARTUP
 # =============================================
 
-app.start_time = time.time()
-
-# Start background threads
-cleanup_thread = threading.Thread(target=cleanup_expired_keys, daemon=True)
-cleanup_thread.start()
-
-monitor_thread = threading.Thread(target=storage_monitor, daemon=True)
-monitor_thread.start()
-
-# This is for local development only
-# Render uses gunicorn which ignores this
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
