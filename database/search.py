@@ -7,6 +7,7 @@ import hashlib
 import json
 import requests
 import urllib.parse
+import uuid
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -43,57 +44,78 @@ class SearchEngine:
     def _fetch_from_web(self, query):
         """Fetch knowledge from multiple web sources and auto-save to database"""
         all_items = []
+        query_lower = query.lower().strip()
 
         # Source 1: DuckDuckGo Instant Answer API
         try:
-            ddg_url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1"
+            ddg_url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
             ddg_resp = requests.get(ddg_url, timeout=10, headers={'User-Agent': 'Synapse/1.0'})
             ddg_data = ddg_resp.json()
 
-            # Abstract (main answer)
+            # Abstract (main answer) — this is the direct answer
             abstract = ddg_data.get('AbstractText', '')
-            abstract_source = ddg_data.get('AbstractURL', 'duckduckgo.com')
+            abstract_source = ddg_data.get('AbstractURL', '')
+            abstract_title = ddg_data.get('Heading', '')
+
             if abstract:
+                full_content = abstract
+                if abstract_title:
+                    full_content = abstract_title + "\n\n" + abstract
+                if abstract_source:
+                    full_content += "\n\nSource: " + abstract_source
+
                 all_items.append({
-                    'content': abstract,
+                    'content': full_content,
                     'type': 'text',
                     'metadata': {
                         'topic': query,
-                        'source': abstract_source,
-                        'fetch_method': 'duckduckgo_abstract'
+                        'source': abstract_source if abstract_source else 'duckduckgo.com',
+                        'fetch_method': 'duckduckgo_abstract',
+                        'title': abstract_title
                     }
                 })
 
-            # Related topics
-            related = ddg_data.get('RelatedTopics', [])
-            for topic in related[:10]:
-                if isinstance(topic, dict) and topic.get('Text'):
-                    all_items.append({
-                        'content': topic['Text'],
-                        'type': 'text',
-                        'metadata': {
-                            'topic': query,
-                            'source': topic.get('FirstURL', 'duckduckgo.com'),
-                            'fetch_method': 'duckduckgo_related'
-                        }
-                    })
+            # Answer (direct answer box)
+            answer = ddg_data.get('Answer', '')
+            if answer and answer != abstract:
+                all_items.append({
+                    'content': "Answer: " + answer,
+                    'type': 'text',
+                    'metadata': {
+                        'topic': query,
+                        'source': 'duckduckgo.com',
+                        'fetch_method': 'duckduckgo_answer'
+                    }
+                })
 
-            # Infobox (structured data)
-            infobox = ddg_data.get('Infobox', {})
-            if infobox and infobox.get('content'):
-                infobox_text = ""
-                for item in infobox['content']:
-                    infobox_text += f"{item.get('label', '')}: {item.get('value', '')}\n"
-                if infobox_text:
-                    all_items.append({
-                        'content': infobox_text,
-                        'type': 'text',
-                        'metadata': {
-                            'topic': query,
-                            'source': 'duckduckgo.com',
-                            'fetch_method': 'duckduckgo_infobox'
-                        }
-                    })
+            # Definition
+            definition = ddg_data.get('Definition', '')
+            if definition:
+                all_items.append({
+                    'content': "Definition: " + definition,
+                    'type': 'text',
+                    'metadata': {
+                        'topic': query,
+                        'source': ddg_data.get('DefinitionSource', 'duckduckgo.com'),
+                        'fetch_method': 'duckduckgo_definition'
+                    }
+                })
+
+            # Related topics — filtered for relevance
+            related = ddg_data.get('RelatedTopics', [])
+            for topic in related:
+                if isinstance(topic, dict) and topic.get('Text'):
+                    topic_text = topic.get('Text', '')
+                    if self._is_relevant_result(query_lower, topic_text):
+                        all_items.append({
+                            'content': topic_text,
+                            'type': 'text',
+                            'metadata': {
+                                'topic': query,
+                                'source': topic.get('FirstURL', 'duckduckgo.com'),
+                                'fetch_method': 'duckduckgo_related'
+                            }
+                        })
 
         except Exception as e:
             logger.warning(f"DuckDuckGo fetch failed for '{query}': {e}")
@@ -105,52 +127,29 @@ class SearchEngine:
             if wiki_resp.status_code == 200:
                 wiki_data = wiki_resp.json()
                 extract = wiki_data.get('extract', '')
-                if extract:
+                title = wiki_data.get('title', '')
+
+                if extract and not self._is_disambiguation(extract):
+                    content = title + "\n\n" + extract
                     all_items.append({
-                        'content': extract,
+                        'content': content,
                         'type': 'text',
                         'metadata': {
                             'topic': query,
                             'source': wiki_data.get('content_urls', {}).get('desktop', {}).get('page', 'wikipedia.org'),
                             'fetch_method': 'wikipedia_summary',
-                            'title': wiki_data.get('title', ''),
+                            'title': title,
                             'description': wiki_data.get('description', '')
                         }
                     })
         except Exception as e:
             logger.warning(f"Wikipedia fetch failed for '{query}': {e}")
 
-        # Source 3: Search what's already stored and merge with web results
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
-                SELECT content, source FROM knowledge 
-                WHERE topic LIKE ? OR content LIKE ?
-                LIMIT 5
-            ''', (f'%{query}%', f'%{query}%'))
-            existing_rows = cursor.fetchall()
-            conn.close()
-
-            for row in existing_rows:
-                all_items.append({
-                    'content': row[0][:500],
-                    'type': 'text',
-                    'metadata': {
-                        'topic': query,
-                        'source': row[1] if row[1] else 'synapse_storage',
-                        'fetch_method': 'local_existing'
-                    }
-                })
-        except Exception as e:
-            logger.warning(f"Local fetch failed: {e}")
-
         # Save all fetched items to database
         saved_count = 0
         conn = get_connection()
         cursor = conn.cursor()
 
-        import uuid
         for item in all_items:
             try:
                 knowledge_id = str(uuid.uuid4())
@@ -160,7 +159,6 @@ class SearchEngine:
                 topic = item['metadata'].get('topic', query)
                 source = item['metadata'].get('source', 'unknown')
 
-                # Generate embedding
                 content_for_embedding = content[:5000] if len(content) > 5000 else content
                 embedding = self.model.encode([content_for_embedding])[0]
                 embedding_bytes = embedding.tobytes()
@@ -170,18 +168,11 @@ class SearchEngine:
                     (id, content, content_type, metadata, embedding, topic, source, trust_score, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    knowledge_id,
-                    content,
-                    content_type,
-                    metadata,
-                    embedding_bytes,
-                    topic,
-                    source,
-                    0.6,  # Default trust score for web sources
+                    knowledge_id, content, content_type, metadata,
+                    embedding_bytes, topic, source, 0.6,
                     datetime.now().isoformat()
                 ))
 
-                # Update source reputation
                 cursor.execute('''
                     INSERT OR IGNORE INTO source_reputation (source, trust_score, total_submissions, first_seen, last_seen)
                     VALUES (?, 0.6, 1, ?, ?)
@@ -197,9 +188,46 @@ class SearchEngine:
         logger.info(f"Fetch-and-save for '{query}': {saved_count} items saved from {len(all_items)} fetched")
         return saved_count
 
+    def _is_relevant_result(self, query, text):
+        """Filter out entertainment/media results for factual queries"""
+        text_lower = text.lower()
+
+        # If query is clearly factual (what, who, define, how), filter entertainment
+        factual_prefixes = ['what is', 'who is', 'define', 'meaning of', 'how does', 'why is', 'when did', 'where is']
+        is_factual = any(query.startswith(p) for p in factual_prefixes)
+
+        if is_factual:
+            entertainment_markers = [
+                'film', 'movie', 'novel', 'album', 'song', 'episode',
+                'video game', 'tv series', 'television series', 'book by',
+                'directed by', 'starring', 'soundtrack', 'box office',
+                'released in', 'season', 'netflix', 'amazon prime'
+            ]
+            for marker in entertainment_markers:
+                if marker in text_lower:
+                    query_has_marker = any(m in query for m in entertainment_markers)
+                    if not query_has_marker:
+                        return False
+
+        return True
+
+    def _is_disambiguation(self, text):
+        """Check if Wikipedia returned a disambiguation page"""
+        disambig_markers = [
+            'may refer to:',
+            'may also refer to:',
+            'commonly refers to:',
+            'is the name of:',
+            'can refer to:'
+        ]
+        first_200 = text[:200].lower()
+        for marker in disambig_markers:
+            if marker in first_200:
+                return True
+        return False
+
     def _search_local(self, query, search_type='all', limit=20):
         """Semantic search across local knowledge base"""
-        # Check cache
         cached = self._check_cache(query, search_type, limit)
         if cached:
             return cached
