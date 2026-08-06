@@ -1,9 +1,7 @@
-import sqlite3
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from database.models import get_connection
 from config import Config
-from utils.text_processor import detect_query_language
 import logging
 import hashlib
 import json
@@ -21,8 +19,10 @@ class SearchEngine:
             self.model = SentenceTransformer(Config.EMBEDDING_MODEL)
 
     def search(self, query, search_type='all', limit=20):
+        """Semantic search across knowledge base with trust score weighting"""
         self._load_model()
 
+        # Check cache
         cached = self._check_cache(query, search_type, limit)
         if cached:
             return cached
@@ -88,6 +88,7 @@ class SearchEngine:
         return results
 
     def keyword_search(self, query, limit=20):
+        """Fallback keyword-based search"""
         conn = get_connection()
         cursor = conn.cursor()
 
