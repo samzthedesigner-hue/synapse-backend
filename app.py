@@ -46,6 +46,10 @@ def get_key_manager():
 def dashboard():
     return send_from_directory('static', 'dashboard.html')
 
+@app.route('/dashboard/knowledge')
+def dashboard_knowledge():
+    return send_from_directory('static', 'knowledge.html')
+
 # =============================================
 # API KEY MANAGEMENT
 # =============================================
@@ -92,6 +96,18 @@ def list_keys():
     keys = km.list_keys()
     return jsonify({"keys": keys, "total": len(keys)})
 
+@app.route('/admin/keys/<key_id>', methods=['GET'])
+def get_key(key_id):
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header != f"Bearer {Config.ADMIN_SECRET}":
+        return jsonify({"error": "Unauthorized"}), 401
+
+    km = get_key_manager()
+    key_info = km.get_key_info(key_id)
+    if not key_info:
+        return jsonify({"error": "Key not found"}), 404
+    return jsonify(key_info)
+
 @app.route('/admin/keys/<key_id>/revoke', methods=['POST'])
 def revoke_key(key_id):
     auth_header = request.headers.get('Authorization', '')
@@ -105,9 +121,61 @@ def revoke_key(key_id):
 
     return jsonify({"status": "revoked", "id": key_id})
 
+@app.route('/admin/keys/<key_id>/limits', methods=['PUT'])
+def update_key_limits(key_id):
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header != f"Bearer {Config.ADMIN_SECRET}":
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json() or {}
+    token_limit = data.get('token_limit')
+    request_limit = data.get('request_limit')
+
+    km = get_key_manager()
+    success = km.update_limits(key_id, token_limit, request_limit)
+    if not success:
+        return jsonify({"error": "Key not found"}), 404
+
+    return jsonify({"status": "updated", "id": key_id})
+
+@app.route('/admin/stats')
+def admin_stats():
+    auth_header = request.headers.get('Authorization', '')
+    if auth_header != f"Bearer {Config.ADMIN_SECRET}":
+        return jsonify({"error": "Unauthorized"}), 401
+
+    ds = get_data_store()
+    km = get_key_manager()
+    storage_stats = ds.get_stats()
+    key_stats = km.get_stats()
+
+    return jsonify({
+        "storage": storage_stats,
+        "keys": key_stats,
+        "uptime": time.time() - app.start_time if hasattr(app, 'start_time') else 0
+    })
+
 # =============================================
-# INTERNAL ENDPOINTS (NeuralForge)
+# INTERNAL ENDPOINTS (NeuralForge & Synapse App)
+# No API key required
 # =============================================
+
+@app.route('/internal/fetch')
+def internal_fetch():
+    """Search web + auto-save + return results — all in one call"""
+    if not is_internal_request(request):
+        return jsonify({"error": "Internal access only"}), 403
+
+    query = request.args.get('q', '')
+    search_type = request.args.get('type', 'all')
+    limit = int(request.args.get('limit', 20))
+
+    if not query:
+        return jsonify({"error": "Query required"}), 400
+
+    se = get_search_engine()
+    result = se.search_and_fetch(query, search_type, limit)
+    return jsonify(result)
 
 @app.route('/internal/search')
 def internal_search():
@@ -216,8 +284,8 @@ def internal_get_file(knowledge_id):
     mime_types = {
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
         'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
-        'mp4': 'video/mp4', 'webm': 'video/webm',
-        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+        'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/x-msvideo',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'flac': 'audio/flac',
         'pdf': 'application/pdf', 'txt': 'text/plain', 'json': 'application/json'
     }
     mime = mime_types.get(file_ext.lower(), 'application/octet-stream')
@@ -244,6 +312,22 @@ def external_search():
 
     return jsonify({"results": results, "count": len(results), "query": query, "tokens_used": tokens})
 
+@app.route('/api/v1/fetch')
+@require_api_key
+@check_token_limit
+def external_fetch():
+    """External: search web + save + return"""
+    query = request.args.get('q', '')
+    search_type = request.args.get('type', 'all')
+    limit = int(request.args.get('limit', 20))
+
+    if not query:
+        return jsonify({"error": "Query required"}), 400
+
+    se = get_search_engine()
+    result = se.search_and_fetch(query, search_type, limit)
+    return jsonify(result)
+
 @app.route('/api/v1/store', methods=['POST'])
 @require_api_key
 @check_token_limit
@@ -265,7 +349,7 @@ def external_store():
         return jsonify({"error": "Storage limit reached"}), 413
 
     tokens = len(data['content'].split())
-    return jsonify({"id": stored_id, "status": "stored", "type": data.get('type', 'text'), "tokens_used": tokens})
+    return jsonify({"id": stored_id, "status": "stored", "tokens_used": tokens})
 
 @app.route('/api/v1/knowledge')
 @require_api_key
@@ -294,8 +378,8 @@ def external_get_file(knowledge_id):
     mime_types = {
         'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
         'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
-        'mp4': 'video/mp4', 'webm': 'video/webm',
-        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg',
+        'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/x-msvideo',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'flac': 'audio/flac',
         'pdf': 'application/pdf', 'txt': 'text/plain', 'json': 'application/json'
     }
     mime = mime_types.get(file_ext.lower(), 'application/octet-stream')
@@ -352,18 +436,52 @@ def index():
 
 @app.route('/health')
 def health():
-    return jsonify({"status": "healthy"})
+    ds = get_data_store()
+    stats = ds.get_stats()
+    return jsonify({
+        "status": "healthy",
+        "uptime": time.time() - app.start_time if hasattr(app, 'start_time') else 0,
+        "storage": stats
+    })
 
 # =============================================
-# STARTUP — FOR RENDER
+# BACKGROUND TASKS
+# =============================================
+
+def cleanup_expired_keys():
+    while True:
+        time.sleep(3600)
+        try:
+            km = get_key_manager()
+            count = km.deactivate_expired_keys()
+            if count > 0:
+                logger.info(f"Deactivated {count} expired API keys")
+        except Exception as e:
+            logger.error(f"Key cleanup error: {e}")
+
+def storage_monitor():
+    while True:
+        time.sleep(43200)
+        try:
+            ds = get_data_store()
+            stats = ds.get_stats()
+            logger.info(f"Storage: {stats['total_items']} items, "
+                       f"{stats['file_storage']['total_gb']} GB files")
+        except Exception as e:
+            logger.error(f"Storage monitor error: {e}")
+
+# =============================================
+# STARTUP
 # =============================================
 
 if __name__ == '__main__':
-    import os
-    port = int(os.environ.get('PORT', 10000))
-    print(f"Starting Synapse on port {port}...")
-    app.run(host='0.0.0.0', port=port, debug=False)
-else:
-    # When running with gunicorn
-    import os
-    print(f"Synapse ready on port {os.environ.get('PORT', '10000')}")
+    app.start_time = time.time()
+
+    cleanup_thread = threading.Thread(target=cleanup_expired_keys, daemon=True)
+    cleanup_thread.start()
+
+    monitor_thread = threading.Thread(target=storage_monitor, daemon=True)
+    monitor_thread.start()
+
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
