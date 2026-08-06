@@ -11,6 +11,7 @@ def init_database():
     conn = get_connection()
     cursor = conn.cursor()
 
+    # Knowledge table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS knowledge (
             id TEXT PRIMARY KEY,
@@ -28,6 +29,7 @@ def init_database():
         )
     ''')
 
+    # API keys table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS api_keys (
             id TEXT PRIMARY KEY,
@@ -44,17 +46,7 @@ def init_database():
         )
     ''')
 
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS backup_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            status TEXT,
-            items_backed_up INTEGER,
-            size_bytes INTEGER,
-            error_message TEXT
-        )
-    ''')
-
+    # Search cache
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS search_cache (
             query_hash TEXT PRIMARY KEY,
@@ -65,6 +57,7 @@ def init_database():
         )
     ''')
 
+    # Source reputation (spam classifier)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS source_reputation (
             source TEXT PRIMARY KEY,
@@ -76,6 +69,7 @@ def init_database():
         )
     ''')
 
+    # Indexes
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_knowledge_type ON knowledge(content_type)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_knowledge_topic ON knowledge(topic)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_knowledge_source ON knowledge(source)')
