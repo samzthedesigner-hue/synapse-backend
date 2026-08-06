@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synapse - API Key Manager</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: #0a0a0f; color: #e0e0e0; min-height: 100vh; padding: 20px;
+        }
+        .container { max-width: 900px; margin: 0 auto; }
+        header { text-align: center; padding: 30px 0; border-bottom: 1px solid #1a1a2e; margin-bottom: 30px; }
+        header h1 { font-size: 2em; color: #7c3aed; margin-bottom: 8px; }
+        header p { color: #888; font-size: 0.9em; }
+        .auth-section, .generate-section, .keys-section {
+            background: #12121a; border: 1px solid #1a1a2e; border-radius: 12px; padding: 20px; margin-bottom: 20px;
+        }
+        .auth-section input {
+            width: 100%; padding: 12px; background: #0a0a0f; border: 1px solid #2a2a3e;
+            border-radius: 8px; color: #e0e0e0; font-size: 1em; margin-bottom: 10px;
+        }
+        .auth-section button, .generate-btn {
+            padding: 12px 24px; color: white; border: none; border-radius: 8px; cursor: pointer;
+            font-size: 1em; font-weight: 600;
+        }
+        .auth-section button { background: #7c3aed; }
+        .auth-section button:hover { background: #6d28d9; }
+        .generate-section h2, .keys-section h2 { color: #7c3aed; margin-bottom: 15px; }
+        .form-row { display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
+        .form-row input {
+            flex: 1; min-width: 150px; padding: 10px; background: #0a0a0f;
+            border: 1px solid #2a2a3e; border-radius: 8px; color: #e0e0e0; font-size: 0.9em;
+        }
+        .form-row input::placeholder { color: #555; }
+        .generate-btn { background: #10b981; padding: 12px 30px; margin-top: 10px; }
+        .generate-btn:hover { background: #059669; }
+        .generated-key {
+            background: #0a0a0f; border: 1px solid #10b981; border-radius: 8px;
+            padding: 15px; margin-top: 15px; display: none;
+        }
+        .generated-key .key-value {
+            font-family: 'Courier New', monospace; color: #10b981;
+            font-size: 1em; word-break: break-all; margin: 10px 0;
+        }
+        .generated-key .warning { color: #f59e0b; font-size: 0.85em; margin-top: 10px; }
+        .key-card {
+            background: #0a0a0f; border: 1px solid #1a1a2e; border-radius: 8px;
+            padding: 15px; margin-bottom: 10px; display: flex;
+            justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;
+        }
+        .key-card.revoked { opacity: 0.5; border-color: #3a1a1a; }
+        .key-card .key-info { flex: 1; min-width: 200px; }
+        .key-card .key-name { font-weight: 600; color: #e0e0e0; margin-bottom: 5px; }
+        .key-card .key-details { font-size: 0.85em; color: #888; }
+        .key-card .key-details span { margin-right: 15px; }
+        .key-card .usage-bar {
+            width: 100%; height: 4px; background: #1a1a2e;
+            border-radius: 2px; margin-top: 8px; overflow: hidden;
+        }
+        .key-card .usage-fill { height: 100%; background: #7c3aed; border-radius: 2px; transition: width 0.3s; }
+        .key-card .usage-fill.warning { background: #f59e0b; }
+        .key-card .usage-fill.danger { background: #ef4444; }
+        .revoke-btn {
+            padding: 8px 16px; background: transparent; color: #ef4444;
+            border: 1px solid #ef4444; border-radius: 6px; cursor: pointer;
+            font-size: 0.85em; font-weight: 600; transition: all 0.2s;
+        }
+        .revoke-btn:hover { background: #ef4444; color: white; }
+        .revoked-badge { padding: 8px 16px; color: #666; border: 1px solid #333; border-radius: 6px; font-size: 0.85em; }
+        .toast {
+            position: fixed; bottom: 20px; right: 20px; padding: 12px 20px;
+            border-radius: 8px; color: white; font-weight: 600; z-index: 1000;
+            animation: slideIn 0.3s ease;
+        }
+        .toast.success { background: #10b981; }
+        .toast.error { background: #ef4444; }
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        .empty-state { text-align: center; padding: 40px; color: #555; }
+        .hidden { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>⚡ Synapse</h1>
+            <p>API Key Manager</p>
+        </header>
+
+        <div class="auth-section" id="authSection">
+            <input type="password" id="adminSecret" placeholder="Enter admin secret...">
+            <button onclick="authenticate()">Unlock</button>
+        </div>
+
+        <div id="mainContent" class="hidden">
+            <div class="generate-section">
+                <h2>Generate New API Key</h2>
+                <div class="form-row">
+                    <input type="text" id="keyName" placeholder="Key name (e.g., My Project)">
+                    <input type="number" id="tokenLimit" placeholder="Token limit" value="10000">
+                    <input type="number" id="requestLimit" placeholder="Request limit" value="100000">
+                    <input type="number" id="expiryDays" placeholder="Expires in days (0=never)" value="0">
+                </div>
+                <button class="generate-btn" onclick="generateKey()">Generate Key</button>
+
+                <div class="generated-key" id="generatedKeyBox">
+                    <strong>✅ Key Generated</strong>
+                    <div class="key-value" id="generatedKeyValue"></div>
+                    <div class="warning">⚠️ Copy this key now. It will not be shown again.</div>
+                    <button style="margin-top:10px; padding:8px 16px; background:#7c3aed; color:white; border:none; border-radius:6px; cursor:pointer;" onclick="copyKey()">Copy to Clipboard</button>
+                </div>
+            </div>
+
+            <div class="keys-section">
+                <h2>API Keys</h2>
+                <div id="keysList">
+                    <div class="empty-state">Loading keys...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let adminToken = '';
+        const API_BASE = window.location.origin;
+
+        function authenticate() {
+            const secret = document.getElementById('adminSecret').value;
+            adminToken = secret;
+
+            fetch(`${API_BASE}/admin/keys`, {
+                headers: { 'Authorization': `Bearer ${adminToken}` }
+            })
+            .then(r => {
+                if (r.ok) {
+                    document.getElementById('authSection').classList.add('hidden');
+                    document.getElementById('mainContent').classList.remove('hidden');
+                    loadKeys();
+                } else {
+                    showToast('Invalid admin secret', 'error');
+                }
+            })
+            .catch(() => showToast('Connection failed', 'error'));
+        }
+
+        function loadKeys() {
+            fetch(`${API_BASE}/admin/keys`, {
+                headers: { 'Authorization': `Bearer ${adminToken}` }
+            })
+            .then(r => r.json())
+            .then(data => {
+                const container = document.getElementById('keysList');
+
+                if (!data.keys || data.keys.length === 0) {
+                    container.innerHTML = '<div class="empty-state">No API keys yet. Generate one above.</div>';
+                    return;
+                }
+
+                container.innerHTML = data.keys.map(key => {
+                    const usagePercent = key.usage_percent || 0;
+                    let barClass = '';
+                    if (usagePercent > 90) barClass = 'danger';
+                    else if (usagePercent > 70) barClass = 'warning';
+
+                    return `
+                        <div class="key-card ${key.is_active ? '' : 'revoked'}">
+                            <div class="key-info">
+                                <div class="key-name">
+                                    ${key.name}
+                                    ${key.is_active ? '' : '<span style="color:#ef4444; font-size:0.8em;"> (Revoked)</span>'}
+                                </div>
+                                <div class="key-details">
+                                    <span>🔑 ${key.key_masked}</span>
+                                    <span>📊 ${key.requests_used}/${key.request_limit} req</span>
+                                    <span>🪙 ${key.tokens_used}/${key.token_limit} tokens</span>
+                                    ${key.expires_at ? `<span>⏰ Expires: ${new Date(key.expires_at).toLocaleDateString()}</span>` : ''}
+                                </div>
+                                <div class="usage-bar">
+                                    <div class="usage-fill ${barClass}" style="width: ${usagePercent}%"></div>
+                                </div>
+                            </div>
+                            ${key.is_active
+                                ? `<button class="revoke-btn" onclick="revokeKey('${key.id}')">✕ Revoke</button>`
+                                : '<span class="revoked-badge">Revoked</span>'
+                            }
+                        </div>
+                    `;
+                }).join('');
+            })
+            .catch(() => showToast('Failed to load keys', 'error'));
+        }
+
+        function generateKey() {
+            const name = document.getElementById('keyName').value || 'Unnamed Key';
+            const tokenLimit = parseInt(document.getElementById('tokenLimit').value) || 10000;
+            const requestLimit = parseInt(document.getElementById('requestLimit').value) || 100000;
+            const expiryDays = parseInt(document.getElementById('expiryDays').value) || 0;
+
+            fetch(`${API_BASE}/admin/keys/generate`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${adminToken}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    name: name,
+                    token_limit: tokenLimit,
+                    request_limit: requestLimit,
+                    expires_in_days: expiryDays
+                })
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) {
+                    showToast(data.error, 'error');
+                    return;
+                }
+
+                document.getElementById('generatedKeyValue').textContent = data.key.api_key;
+                document.getElementById('generatedKeyBox').style.display = 'block';
+                showToast('Key generated successfully', 'success');
+                loadKeys();
+            })
+            .catch(() => showToast('Failed to generate key', 'error'));
+        }
+
+        function revokeKey(keyId) {
+            if (!confirm('Revoke this key? It will immediately stop working.')) return;
+
+            fetch(`${API_BASE}/admin/keys/${keyId}/revoke`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${adminToken}` }
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status === 'revoked') {
+                    showToast('Key revoked', 'success');
+                    loadKeys();
+                } else {
+                    showToast(data.error || 'Failed', 'error');
+                }
+            })
+            .catch(() => showToast('Failed to revoke key', 'error'));
+        }
+
+        function copyKey() {
+            const keyText = document.getElementById('generatedKeyValue').textContent;
+            navigator.clipboard.writeText(keyText).then(() => {
+                showToast('Copied to clipboard', 'success');
+            });
+        }
+
+        function showToast(message, type) {
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            setTimeout(() => toast.remove(), 3000);
+        }
+    </script>
+</body>
+</html>
