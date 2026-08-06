@@ -1,9 +1,8 @@
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response
 from config import Config
 from database.store import DataStore
 from database.search import SearchEngine
 from api.middleware import require_api_key, is_internal_request, check_token_limit
-from backup.google_drive import backup_to_drive, restore_from_drive
 from keys.manager import KeyManager
 import threading
 import time
@@ -153,6 +152,7 @@ def admin_stats():
 
 # =============================================
 # INTERNAL ENDPOINTS (called by NeuralForge)
+# No API key required
 # =============================================
 
 @app.route('/internal/search')
@@ -186,8 +186,13 @@ def internal_store():
     content = data['content']
     content_type = data.get('type', 'text')
     metadata = data.get('metadata', {})
+    file_data = data.get('file_data')
+    file_extension = data.get('file_extension')
 
-    stored_id = data_store.save(content, content_type, metadata)
+    stored_id = data_store.save(content, content_type, metadata, file_data, file_extension)
+
+    if stored_id is None:
+        return jsonify({"error": "Storage limit reached for this file type"}), 413
 
     logger.info(f"Internal store: {stored_id} ({content_type})")
 
@@ -245,8 +250,11 @@ def internal_bulk_store():
         content = item.get('content', '')
         content_type = item.get('type', 'text')
         metadata = item.get('metadata', {})
-        stored_id = data_store.save(content, content_type, metadata)
-        stored_ids.append(stored_id)
+        file_data = item.get('file_data')
+        file_extension = item.get('file_extension')
+        stored_id = data_store.save(content, content_type, metadata, file_data, file_extension)
+        if stored_id:
+            stored_ids.append(stored_id)
 
     logger.info(f"Bulk store: {len(stored_ids)} items")
 
@@ -256,8 +264,30 @@ def internal_bulk_store():
         "status": "stored"
     })
 
+@app.route('/internal/file/<knowledge_id>')
+def internal_get_file(knowledge_id):
+    if not is_internal_request(request):
+        return jsonify({"error": "Internal access only"}), 403
+
+    file_data, file_ext = data_store.get_file(knowledge_id)
+    if file_data is None:
+        return jsonify({"error": "File not found"}), 404
+
+    mime_types = {
+        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+        'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+        'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/x-msvideo',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'flac': 'audio/flac',
+        'pdf': 'application/pdf', 'json': 'application/json',
+        'txt': 'text/plain', 'csv': 'text/csv', 'html': 'text/html',
+        'zip': 'application/zip', 'tar': 'application/x-tar', 'gz': 'application/gzip'
+    }
+    mime = mime_types.get(file_ext.lower(), 'application/octet-stream')
+    return Response(file_data, mimetype=mime)
+
 # =============================================
 # EXTERNAL ENDPOINTS (API key required)
+# Token limits enforced
 # =============================================
 
 @app.route('/api/v1/search')
@@ -293,8 +323,14 @@ def external_store():
     content = data['content']
     content_type = data.get('type', 'text')
     metadata = data.get('metadata', {})
+    file_data = data.get('file_data')
+    file_extension = data.get('file_extension')
 
-    stored_id = data_store.save(content, content_type, metadata)
+    stored_id = data_store.save(content, content_type, metadata, file_data, file_extension)
+
+    if stored_id is None:
+        return jsonify({"error": "Storage limit reached for this file type"}), 413
+
     tokens = len(content.split())
 
     logger.info(f"External store: {stored_id} ({content_type})")
@@ -327,6 +363,25 @@ def external_get_knowledge():
         "tokens_used": tokens
     })
 
+@app.route('/api/v1/file/<knowledge_id>')
+@require_api_key
+def external_get_file(knowledge_id):
+    file_data, file_ext = data_store.get_file(knowledge_id)
+    if file_data is None:
+        return jsonify({"error": "File not found"}), 404
+
+    mime_types = {
+        'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'png': 'image/png',
+        'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+        'mp4': 'video/mp4', 'webm': 'video/webm', 'avi': 'video/x-msvideo',
+        'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'flac': 'audio/flac',
+        'pdf': 'application/pdf', 'json': 'application/json',
+        'txt': 'text/plain', 'csv': 'text/csv', 'html': 'text/html',
+        'zip': 'application/zip', 'tar': 'application/x-tar', 'gz': 'application/gzip'
+    }
+    mime = mime_types.get(file_ext.lower(), 'application/octet-stream')
+    return Response(file_data, mimetype=mime)
+
 @app.route('/api/v1/stats')
 @require_api_key
 def external_stats():
@@ -337,7 +392,8 @@ def external_stats():
 @require_api_key
 def key_info():
     api_key = request.headers.get('X-API-Key')
-    key_hash = __import__('hashlib').sha256(api_key.encode()).hexdigest()
+    import hashlib
+    key_hash = hashlib.sha256(api_key.encode()).hexdigest()
     info = key_manager.get_key_info_by_hash(key_hash)
 
     if not info:
@@ -387,27 +443,8 @@ def health():
 # BACKGROUND TASKS
 # =============================================
 
-def scheduled_backup():
-    time.sleep(300)
-    while True:
-        try:
-            logger.info("Starting scheduled backup to Google Drive...")
-            backup_to_drive()
-            logger.info("Backup completed successfully")
-        except Exception as e:
-            logger.error(f"Backup failed: {e}")
-        time.sleep(21600)
-
-def restore_on_startup():
-    try:
-        logger.info("Checking for existing Google Drive backup...")
-        restored = restore_from_drive()
-        if restored:
-            logger.info("Data restored from Google Drive backup")
-    except Exception as e:
-        logger.warning(f"Restore skipped: {e}")
-
 def cleanup_expired_keys():
+    """Deactivate expired API keys"""
     while True:
         time.sleep(3600)
         try:
@@ -417,16 +454,31 @@ def cleanup_expired_keys():
         except Exception as e:
             logger.error(f"Key cleanup error: {e}")
 
+def storage_monitor():
+    """Log storage stats periodically"""
+    while True:
+        time.sleep(43200)  # Every 12 hours
+        try:
+            stats = data_store.get_stats()
+            logger.info(f"Storage stats: {stats['total_items']} items, "
+                       f"{stats['file_storage']['total_mb']} MB files, "
+                       f"{stats['content_mb']} MB content")
+        except Exception as e:
+            logger.error(f"Storage monitor error: {e}")
+
 # =============================================
 # STARTUP
 # =============================================
 
 if __name__ == '__main__':
     app.start_time = time.time()
-    restore_on_startup()
-    backup_thread = threading.Thread(target=scheduled_backup, daemon=True)
-    backup_thread.start()
+
+    # Start background threads
     cleanup_thread = threading.Thread(target=cleanup_expired_keys, daemon=True)
     cleanup_thread.start()
+
+    monitor_thread = threading.Thread(target=storage_monitor, daemon=True)
+    monitor_thread.start()
+
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
