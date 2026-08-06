@@ -3,8 +3,16 @@ services:
     name: synapse-backend
     env: python
     region: singapore
-    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 180
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.11.11
+      - key: PORT
+        value: "10000"
+      - key: SECRET_KEY
+        value: syn-flask-x9K2mP7vL4nQ1wR8
+      - key: INTERNAL_SECRET
+        value: syn-internal-y6H3jB8fD2sA5gM9
+      - key: ADMIN_SECRET
+        value: syn-admin-c4W7vN1tR3pL6kE0
