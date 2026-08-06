@@ -1,5 +1,4 @@
 import re
-import math
 from collections import Counter
 
 STOP_WORDS = {
