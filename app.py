@@ -470,15 +470,17 @@ def storage_monitor():
 # STARTUP
 # =============================================
 
+app.start_time = time.time()
+
+# Start background threads
+cleanup_thread = threading.Thread(target=cleanup_expired_keys, daemon=True)
+cleanup_thread.start()
+
+monitor_thread = threading.Thread(target=storage_monitor, daemon=True)
+monitor_thread.start()
+
+# This is for local development only
+# Render uses gunicorn which ignores this
 if __name__ == '__main__':
-    app.start_time = time.time()
-
-    # Start background threads
-    cleanup_thread = threading.Thread(target=cleanup_expired_keys, daemon=True)
-    cleanup_thread.start()
-
-    monitor_thread = threading.Thread(target=storage_monitor, daemon=True)
-    monitor_thread.start()
-
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
